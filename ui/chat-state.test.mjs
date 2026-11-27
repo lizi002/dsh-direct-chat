@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import {
-  accountChoiceLabel, composerAccount, applyEvent, attachmentIssue, attachmentKind, hasDraggedFiles, configGroups, createSession, deleteSession, engineLabel, fileUriReference, inlineFileReference,
+  accountChoiceLabel, composerAccount, applyEvent, attachmentIssue, attachmentKind, hasDraggedFiles, configGroups, createEngineCatalog, createSession, deleteSession, engineLabel, fileUriReference, inlineFileReference,
   listEngines, markdownFileReference, normalizeMarkdownFileUrls, previewAttachment, previewFile, projectActivity, promptDelivery, stageCommand,
 } from './chat-state.mjs'
 
@@ -233,4 +233,23 @@ test('AGY composer uses the updated session identity when the engine catalog has
   assert.deepEqual(composerAccount(signedOut, catalog, false), signedOut)
   assert.equal(composerAccount(signedOut, catalog, true).account, undefined)
   assert.equal(composerAccount(undefined, catalog, true).account, 'old@example.test')
+})
+
+test('independent CLI updates overlap while duplicate and all-engine operations wait for idle', async () => {
+  const catalog = createEngineCatalog(async () => [])
+  const gate = Promise.withResolvers()
+  const first = catalog.runOperation('claude', 'update', () => gate.promise)
+  const unexpected = () => assert.fail('conflicting action started')
+  await catalog.runOperation('claude', 'check', unexpected)
+  await catalog.runOperation('all', 'check', unexpected)
+  assert.equal(await catalog.runOperation('codex', 'update', async () => 'updated'), 'updated')
+  assert.deepEqual([...catalog.getSnapshot().operations], [['claude', 'update']])
+  gate.resolve()
+  await first
+  const all = Promise.withResolvers()
+  const check = catalog.runOperation('all', 'check', () => all.promise)
+  await catalog.runOperation('agy', 'update', unexpected)
+  all.reject(new Error('offline'))
+  await assert.rejects(check, /offline/)
+  assert.equal(catalog.getSnapshot().operations.size, 0)
 })

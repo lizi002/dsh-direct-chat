@@ -5,10 +5,10 @@ import {
   IconChevronDownOutlineRegular, IconChevronLeftOutlineRegular, IconChevronRightOutlineRegular,
   IconCloseFillRegular, IconCloseOutlineRegular, IconCompactOutlineRegular, IconDataOutlineRegular,
   IconDownloadOutlineRegular, IconGoalOutlineRegular, IconPaperPlaneOutlineRegular, IconPlanOutlineRegular,
-  IconNewChatOutlineRegular, IconPaperclipOutlineRegular, IconPlusOutlineRegular, IconSendOutlineRegular,
+  IconNewChatOutlineRegular, IconPaperclipOutlineRegular, IconPlusOutlineRegular, IconRefreshOutlineRegular, IconSendOutlineRegular,
   IconStopFillRegular, Input, isMobileDevice, MarkdownDelegateProvider, MarkdownText,
   IconUsersOutlineRegular, Menu, MenuGroup, MenuSurface, Modal, observeStickyMenuGroups,
-  PermissionIconFullAccessRegular, rankByName, StateDot, TextShimmer, Tooltip,
+  PermissionIconFullAccessRegular, rankByName, StateDot, TextShimmer, Toast, Tooltip,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import { AttachmentRail } from '@deepseek-ai/dsh-client-ui-attachment/src/AttachmentRail.tsx'
 import { TurnNavigator } from '@deepseek-ai/dsh-client-ui-chat/src/client/chat/TurnNavigator.tsx'
@@ -34,7 +34,7 @@ import { MessageQueue, pendingQueueSubmission } from './MessageQueue.jsx'
 import { SessionStatus } from './SessionStatus.jsx'
 import { SessionPet } from './SessionPet.jsx'
 import { RunningJobsAction } from './RunningJobs.jsx'
-import { TranscriptActivity } from './TranscriptActivity.jsx'
+import { TranscriptActivity, toolIcons } from './TranscriptActivity.jsx'
 import { WorkspaceDiff } from './WorkspaceDiff.jsx'
 import { appendReviewQuote } from './workspace-diff-view.mjs'
 import { questionReply } from './codex-transcript.mjs'
@@ -43,6 +43,8 @@ import { createTranscriptFollow, isNearTranscriptBottom, transcriptTurnItems } f
 
 const noAgents = []
 const noTools = []
+const nativeSyncEngines = new Set(['codex', 'agy', 'claude'])
+const nativeSyncStatuses = new Set(['synced', 'current', 'busy', 'conflict', 'unavailable'])
 
 const isBackgroundTool = tool => {
   if (!tool) return false
@@ -192,6 +194,8 @@ export function DirectChat({ navigation, startNative, renderFactorySlot, useCont
           </>}
         </div>
         <div className="dchat-header-actions">
+          {target.id && nativeSyncEngines.has(current?.engine ?? target.engine) && <NativeSyncAction
+            key={`native-sync-${target.id}`} id={target.id} summary={currentRuntime} refreshHistory={navigation.refreshHistory} t={t} />}
           {target.id && <RunningJobsAction key={target.id} sessionId={target.id} summary={currentRuntime} t={t} />}
           {diffController && <WorkspaceDiff controller={diffController} t={t} />}
           {statusStore && <SessionPet variant="header" statusStore={statusStore} nativeSessions={nativeSessions}
@@ -217,6 +221,99 @@ export function DirectChat({ navigation, startNative, renderFactorySlot, useCont
       </aside>
     </>}
   </div>
+}
+
+function NativeSyncAction({ id, summary, refreshHistory, t }) {
+  const [syncing, setSyncing] = useState(false)
+  const [notice, setNotice] = useState(null)
+  const [previewOpen, setPreviewOpen] = useState(false)
+  const request = useRef(false)
+  const noticeSequence = useRef(0)
+  const conflict = summary?.nativeConflict || notice?.status === 'conflict'
+  const busy = summary?.busy || summary?.pending
+  const disabled = syncing || (!conflict && (!summary?.ready || busy))
+  const label = t(syncing ? 'nativeSync.syncing' : conflict ? 'nativeSync.view' : busy ? 'nativeSync.busy' : 'nativeSync.action')
+
+  const activate = async () => {
+    if (disabled || request.current) return
+    if (conflict) {
+      setPreviewOpen(true)
+      return
+    }
+    request.current = true
+    setSyncing(true)
+    setNotice(null)
+    let status = 'failed'
+    try {
+      const result = await sessionAction(id, 'sync-native', {})
+      if (nativeSyncStatuses.has(result?.status)) status = result.status
+    } catch {}
+    request.current = false
+    setSyncing(false)
+    setNotice({ status, sequence: ++noticeSequence.current })
+    if (status === 'synced') void refreshHistory?.()
+  }
+
+  return <>
+    <Tooltip label={label} side="bottom" align="end" portal>
+      <Button className="dchat-native-sync" size="sm" aria-label={label} aria-disabled={disabled || undefined}
+        aria-haspopup={conflict ? 'dialog' : undefined} aria-busy={syncing || undefined} onClick={activate}>
+        {syncing ? <StateDot state="ongoing" /> : conflict
+          ? <IconBranchOutlineRegular size={16} />
+          : <IconRefreshOutlineRegular size={16} />}
+      </Button>
+    </Tooltip>
+    {notice && <Toast key={notice.sequence} text={t(`nativeSync.${notice.status}`)}
+      tone={['synced', 'current'].includes(notice.status) ? 'success' : undefined} onDone={() => setNotice(null)} />}
+    {previewOpen && <NativeHistoryPreview id={id} close={() => setPreviewOpen(false)} t={t} />}
+  </>
+}
+
+function NativeHistoryPreview({ id, close, t }) {
+  const [messages, setMessages] = useState(null)
+  const [failed, setFailed] = useState(false)
+  useEffect(() => {
+    let active = true
+    sessionAction(id, 'native-preview', {}).then(result => {
+      if (!active) return
+      if (Array.isArray(result?.messages)) {
+        setMessages(result.messages.filter(message => message?.role === 'user' || message?.role === 'assistant'))
+      } else {
+        setFailed(true)
+      }
+    }, () => { if (active) setFailed(true) })
+    return () => { active = false }
+  }, [id])
+
+  return <Modal open title={t('nativeSync.previewTitle')} description={t('nativeSync.previewDescription')}
+    closeLabel={t('close')} onClose={close} className="dchat-native-preview"
+    footer={<Button variant="outline" data-modal-autofocus onClick={close}>{t('close')}</Button>}>
+    {failed ? <p className="dchat-error" role="alert">{t('nativeSync.previewFailed')}</p>
+      : messages === null ? <p className="dchat-status" role="status">{t('nativeSync.previewLoading')}</p>
+      : !messages.length ? <p className="dchat-status" role="status">{t('nativeSync.previewEmpty')}</p>
+      : <div className="dchat-native-preview-transcript" tabIndex={0} aria-label={t('transcript')}>
+        {messages.map((message, index) => <NativePreviewMessage key={index} message={message} t={t} />)}
+      </div>}
+  </Modal>
+}
+
+function NativePreviewMessage({ message, t }) {
+  const { text, role, thought, tools } = message
+  return <article className="dchat-native-preview-message" aria-label={t(role === 'user' ? 'you' : 'nativeSync.assistant')}>
+    <h3>{t(role === 'user' ? 'you' : 'nativeSync.assistant')}</h3>
+    {typeof thought === 'string' && thought && <details>
+      <summary>{t('thought')}</summary>
+      <p>{thought}</p>
+    </details>}
+    {Array.isArray(tools) && tools.length > 0 && <details>
+      <summary>{t('nativeSync.tools', { count: tools.length })}</summary>
+      <ul>{tools.map((tool, index) => <li key={index}>
+        {t(Object.hasOwn(toolIcons, tool?.kind) ? `activity.${tool.kind}` : 'permission.tool')}
+        {['pending', 'in_progress', 'completed', 'failed'].includes(tool?.status) && ` · ${t(tool.status)}`}
+      </li>)}</ul>
+    </details>}
+    {typeof text === 'string' && text && <p>{text}</p>}
+  </article>
 }
 
 function SessionPane({ queueDock, onAgentSummary, onRuntimeSummary, target, navigation, startNative, performanceSettings, submissionSettings = defaultSubmissionSettings, onSession, renderFactorySlot, workspaceSource, engine, engines, engineStatus, engineSource, reloadEngines, diffController, t }) {
@@ -729,6 +826,7 @@ function SessionPane({ queueDock, onAgentSummary, onRuntimeSummary, target, navi
   const performRef = useRef(perform)
   performRef.current = perform
   const stopCurrentTurn = useCallback(() => { void performRef.current('cancel') }, [])
+  const nativeConflict = session?.nativeConflict === true
 
   useEffect(() => {
     if (!blank && id) onAgentSummary({ id, agents, ready, error: connectionError })
@@ -739,10 +837,14 @@ function SessionPane({ queueDock, onAgentSummary, onRuntimeSummary, target, navi
       onRuntimeSummary({
         id,
         tools: runtimeTools,
+        ready,
+        busy,
+        pending,
+        nativeConflict,
         stop: busy && ready && !pending ? stopCurrentTurn : null,
       })
     }
-  }, [blank, id, runtimeTools, busy, ready, pending, stopCurrentTurn, onRuntimeSummary])
+  }, [blank, id, runtimeTools, busy, ready, pending, nativeConflict, stopCurrentTurn, onRuntimeSummary])
 
   const resolvedActiveTurn = activeTurn ?? turnItems.at(-1)?.turn ?? null
 

@@ -35,10 +35,8 @@ const agyLogoutMessages = {
 }
 
 export function EngineSettings({ engineSource, focusedEngine, t }) {
-  const { engines, status } = useSyncExternalStore(engineSource.subscribe, engineSource.getSnapshot)
+  const { engines, status, operations } = useSyncExternalStore(engineSource.subscribe, engineSource.getSnapshot)
   const headingId = useId()
-  const [checkingId, setCheckingId] = useState(null)
-  const [updatingId, setUpdatingId] = useState(null)
   const [loggingOutKey, setLoggingOutKey] = useState(null)
   const [expandedId, setExpandedId] = useState(focusedEngine || null)
   const [profilesByEngine, setProfilesByEngine] = useState({})
@@ -145,33 +143,23 @@ export function EngineSettings({ engineSource, focusedEngine, t }) {
   }
 
   const handleCheck = async id => {
-    if (checkingId || updatingId) return
-    setCheckingId(id)
     setNotice(null)
     try {
-      await checkEngineUpdate(id)
-      await engineSource.refresh()
+      await engineSource.runOperation(id, 'check', () => checkEngineUpdate(id))
     } catch (err) {
       setNotice({ text: err.message || t('request.failed'), error: true })
-    } finally {
-      setCheckingId(null)
     }
   }
 
   const handleUpdate = async id => {
-    if (updatingId || checkingId) return
-    setUpdatingId(id)
     setNotice(null)
     try {
-      const res = await updateEngineCli(id)
-      await engineSource.refresh()
+      const res = await engineSource.runOperation(id, 'update', () => updateEngineCli(id))
       if (res?.status?.restartRequired) {
         setNotice({ text: t('engine.restartNeeded'), error: false })
       }
     } catch (err) {
       setNotice({ text: err.message || t('request.failed'), error: true })
-    } finally {
-      setUpdatingId(null)
     }
   }
 
@@ -314,9 +302,9 @@ export function EngineSettings({ engineSource, focusedEngine, t }) {
   return <section className="dchat-archive-settings" aria-labelledby={focusedEngine ? undefined : headingId}>
     {!focusedEngine && <div className="dchat-settings-header">
       <h2 id={headingId}>{t('engineSettings.title')}</h2>
-      <Button variant="outline" size="sm" disabled={Boolean(checkingId) || Boolean(updatingId)}
+      <Button variant="outline" size="sm" disabled={Boolean(operations?.size)}
         onClick={() => void handleCheck('all')}>
-        {checkingId === 'all' ? t('engine.checking') : t('engineSettings.checkAll')}
+        {operations?.has('all') ? t('engine.checking') : t('engineSettings.checkAll')}
       </Button>
     </div>}
     {notice && <p role={notice.error ? 'alert' : 'status'} className={notice.error ? 'dchat-archive-error' : undefined}>
@@ -325,8 +313,8 @@ export function EngineSettings({ engineSource, focusedEngine, t }) {
     {visibleEngines.length > 0 ? <ul className={focusedEngine ? 'dchat-archive-rows dchat-account-focused' : 'dchat-archive-rows'}>
       {visibleEngines.map(eng => {
         const s = eng.status || {}
-        const isChecking = checkingId === eng.id || checkingId === 'all'
-        const isUpdating = updatingId === eng.id
+        const isChecking = operations?.get(eng.id) === 'check' || operations?.has('all')
+        const isUpdating = operations?.get(eng.id) === 'update'
         const profiles = profilesByEngine[eng.id] || eng.profiles || []
         const activeProfileId = eng.defaultProfileId || 'default'
         const activeProfile = profiles.find(item => item.id === activeProfileId)
@@ -412,7 +400,7 @@ export function EngineSettings({ engineSource, focusedEngine, t }) {
 
           {s.installed === false && isExpanded && <div className="dchat-archive-error" role="status">
             {t('engine.cliMissing', { engine: eng.id })}
-            {focusedEngine && eng.canCheckUpdate && <Button variant="outline" size="sm" disabled={isChecking}
+            {focusedEngine && eng.canCheckUpdate && <Button variant="outline" size="sm" disabled={isChecking || isUpdating}
               onClick={() => void handleCheck(eng.id)}>{t('engine.retry')}</Button>}
           </div>}
           {(startingLoginHere || activeLoginHere) && <div className="dchat-profile-form" style={{ fontSize: 12 }}>

@@ -49,10 +49,27 @@ export function createEngineCatalog(load = listEngines) {
     snapshot = next
     for (const listener of listeners) listener()
   }
+  let operations = new Map()
+  const runOperation = async (id, kind, action) => {
+    if (operations.has('all') || operations.has(id) || (id === 'all' && operations.size)) return
+    operations = new Map(operations).set(id, kind)
+    publish({ ...snapshot, operations })
+    try {
+      const result = await action()
+      // An in-flight catalog read may predate this operation's completion.
+      if (pending) await pending
+      await refresh()
+      return result
+    } finally {
+      operations = new Map(operations)
+      operations.delete(id)
+      publish({ ...snapshot, operations })
+    }
+  }
   const refresh = () => {
     if (pending) return pending
     pending = Promise.resolve().then(load).then(engines => {
-      publish({ engines, status: 'ready' })
+      publish({ ...snapshot, engines, status: 'ready' })
     }, () => {
       publish({ ...snapshot, status: 'error' })
     }).finally(() => { pending = undefined })
@@ -62,6 +79,7 @@ export function createEngineCatalog(load = listEngines) {
   return {
     getSnapshot: () => snapshot,
     refresh,
+    runOperation,
     subscribe(listener) {
       listeners.add(listener)
       if (snapshot.status === 'idle') void refresh()

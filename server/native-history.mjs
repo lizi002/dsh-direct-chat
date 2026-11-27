@@ -139,6 +139,13 @@ export function nativeCatalog({ registry, home = homedir(), ...directories }) {
   }
 
   return {
+    async findInDirectory(engine, remoteId, directory) {
+      const definition = registry.get(engine)
+      if (!definition?.history) return
+      const rows = await definition.history.list({ home, directory, remoteId })
+      const row = rows.find(value => value.remoteId === remoteId)
+      if (row) return descriptor(definition, row)
+    },
     async refreshEngine(id) {
       await registry.ready
       await cache.get(id)?.pending

@@ -1116,7 +1116,14 @@ function claudeAdapter(wire, { id, update, publish, approvals, getTurn, emit }) 
       else if (message.stop_reason === 'max_tokens') turn.result.resolve({ stopReason: 'max_tokens' })
       else if (message.stop_reason === 'refusal') turn.result.resolve({ stopReason: 'refusal' })
       else if (message.subtype === 'error_max_turns') turn.result.resolve({ stopReason: 'max_turn_requests' })
-      else if (message.is_error || message.subtype !== 'success') turn.result.reject(new Error('Claude Code turn failed'))
+      else if (message.is_error || message.subtype !== 'success') {
+        const details = [turn.claudeError, ...(Array.isArray(message.errors) ? message.errors : []), message.result]
+          .filter(value => typeof value === 'string' && value.trim()).map(value => value.trim())
+        const reason = [...new Set(details)].join(' · ')
+          .replace(/(Bearer\s+)[^\s"',]+/gi, '$1[redacted]')
+          .replace(/\bsk-[A-Za-z0-9_-]+/g, '[redacted]').slice(0, 1500)
+        turn.result.reject(new Error(reason || 'Claude Code turn failed'))
+      }
       else {
         if (!turn.hasText) update('agent_message_chunk', message.result)
         turn.result.resolve({ stopReason: 'end_turn' })
@@ -1144,7 +1151,12 @@ function claudeAdapter(wire, { id, update, publish, approvals, getTurn, emit }) 
         turn.streamed.add(event.index ?? 'thinking')
         update('agent_thought_chunk', event.delta.thinking)
       }
-    } else if (message.type === 'assistant' && !message.error) {
+    } else if (message.type === 'assistant' && message.error) {
+      const content = message.message?.content
+      const text = Array.isArray(content) ? content.find(block => block?.type === 'text')?.text : undefined
+      turn.claudeError = [message.apiErrorStatus, message.error, text]
+        .filter(value => typeof value === 'string' || typeof value === 'number').join(' · ')
+    } else if (message.type === 'assistant') {
       if (typeof message.message?.id === 'string' && message.message.model !== '<synthetic>') {
         turn.contextRequest = message.message
       }

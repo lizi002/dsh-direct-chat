@@ -145,7 +145,7 @@ function formatClaudeUserText(raw) {
   return raw
 }
 
-async function messages({ file, agentId }) {
+async function messages({ file, agentId }, terminalSince) {
   const chain = new Map()
   let tail
   for await (const row of transcriptLines(file)) {
@@ -164,6 +164,13 @@ async function messages({ file, agentId }) {
     tail = chain.get(tail.parentUuid)
   }
   rawRows.reverse()
+  if (terminalSince !== undefined) {
+    const lastWeb = rawRows.findLastIndex(row => row.entrypoint === 'sdk-ts')
+    const first = rawRows.findIndex((row, index) => index > lastWeb && row.entrypoint === 'cli' &&
+      row.type === 'user' && asMillis(row.timestamp) > terminalSince)
+    if (first < 0) return []
+    rawRows.splice(0, first)
+  }
   const ordered = []
   const toolsById = new Map()
   let pendingThought = ''
@@ -365,7 +372,7 @@ export const engine = {
     adapter.forkRecipe = forkRecipe
     return adapter
   },
-  history: { list, messages, metrics, context },
+  history: { list, messages, metrics, context, terminalMessages: (entry, since) => messages(entry, since) },
 }
 
 export default engine

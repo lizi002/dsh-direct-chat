@@ -358,6 +358,13 @@ lines.on('line', line => {
     }
     const [{ text }] = message.content
     if (text === 'cancel') return
+    if (text === 'missing model') {
+      event('assistant', { error: 'model_not_found', apiErrorStatus: 404,
+        message: { content: [{ type: 'text', text: 'Unknown model fixture-model' }] } })
+      return event('result', { subtype: 'success', is_error: true })
+    }
+    if (text === 'execution failure') return event('result', { subtype: 'error_during_execution', errors: ['Login expired'] })
+    if (text === 'empty failure') return event('result', { subtype: 'success', is_error: true })
     if (text.startsWith('context ')) {
       contextMode = text.slice('context '.length)
       event('system', { subtype: 'init', claude_code_version: contextMode === 'legacy' ? '2.1.300' : '2.1.316' })
@@ -729,6 +736,16 @@ test('Claude Code exposes the resumed account native model choices', { timeout: 
   t.after(() => session.close())
   assert.deepEqual(session.options[0].options.map(option => option.value), ['default', 'light'])
   await assert.rejects(session.configure('model', 'smart'), /Invalid chat configuration/)
+})
+
+test('Claude exposes CLI errors per turn without emitting synthetic assistant text', async t => {
+  const output = collect()
+  const session = await startOther({ engine: 'claude', cwd, emit: output.emit })
+  t.after(() => session.close())
+  await assert.rejects(session.prompt('missing model'), /404.*model_not_found.*fixture-model/)
+  await assert.rejects(session.prompt('execution failure'), { message: 'Login expired' })
+  await assert.rejects(session.prompt('empty failure'), { message: 'Claude Code turn failed' })
+  assert.equal(output.text(), '')
 })
 
 test('Claude sends supported images with and without a caption', { timeout: 7000 }, async t => {

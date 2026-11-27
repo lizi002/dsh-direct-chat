@@ -7,6 +7,7 @@ import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { test } from 'node:test'
 import { pathToFileURL } from 'node:url'
+import { nativeCatalog } from '../server/native-history.mjs'
 import { engine } from '../engines/agy.mjs'
 import { writeAgyArchive } from '../engines/agy-archive.mjs'
 
@@ -93,4 +94,19 @@ test('creates private native annotations and rejects concurrent and malformed ed
   assert.throws(() => writeAgyArchive(directory, remoteId, false), /Invalid AGY annotation string/)
   assert.equal(readFileSync(file, 'utf8'), malformed)
   assert.deepEqual(await readdir(annotations), [remoteId + '.pbtxt'])
+})
+
+test('scoped native lookup reads the requested AGY history even if the default index contains the same ID', async t => {
+  const local = await fixture(t)
+  const work = await fixture(t)
+  const catalog = nativeCatalog({ registry: { get: () => engine }, home: local.home })
+  const db = new DatabaseSync(join(work.directory, 'conversation_summaries.db'))
+  try {
+    db.prepare('UPDATE conversation_summaries SET conversation_id = ?, title = ?').run(local.remoteId, 'Work-only title')
+  } finally { db.close() }
+  const privateRow = await catalog.findInDirectory('agy', local.remoteId, work.directory)
+  assert.equal(privateRow.nativeTitle, 'Work-only title')
+  assert.equal(privateRow.file, join(work.directory, 'conversation_summaries.db'))
+  assert.equal((await catalog.findInDirectory('agy', local.remoteId, local.directory)).nativeTitle, 'Fixture')
+  assert.equal(await catalog.findInDirectory('agy', local.remoteId, join(work.directory, 'absent')), undefined)
 })

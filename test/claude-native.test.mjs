@@ -100,3 +100,16 @@ test('Claude saved quotas retain the observation time and require the matching n
   assert.equal(claudeCachedAccountUsage(config, now - 100_000), undefined)
   assert.equal(claudeCachedAccountUsage(config, now + 60 * 60_000), undefined)
 })
+
+test('Claude terminal continuation keeps repeated prompts and skips prior SDK turns', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'claude-continuation-'))
+  t.after(() => rm(dir, { recursive: true, force: true }))
+  const entry = { file: join(dir, 'session.jsonl') }
+  const turns = [['cli','user','old'], ['sdk-ts','user','again'], ['sdk-ts','assistant','web answer'],
+    ['cli','user','again'], ['cli','assistant','new answer']]
+  const rows = turns.map(([entrypoint,type,text], i) => ({ entrypoint, type, uuid: String(i),
+    parentUuid: i ? String(i - 1) : null, timestamp: new Date(1000 + i).toISOString(), message: { content: text } }))
+  await writeFile(entry.file, rows.map(row => JSON.stringify(row)).join('\n'))
+  assert.deepEqual((await engine.history.terminalMessages(entry, 1002)).map(m => m.text), ['again','new answer'])
+  assert.deepEqual(await engine.history.terminalMessages(entry, 1005), [])
+})

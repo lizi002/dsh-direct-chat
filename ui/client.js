@@ -403,10 +403,26 @@ function createEngineCatalog(load = listEngines) {
     snapshot = next;
     for (const listener of listeners) listener();
   };
+  let operations = /* @__PURE__ */ new Map();
+  const runOperation = async (id, kind, action) => {
+    if (operations.has("all") || operations.has(id) || id === "all" && operations.size) return;
+    operations = new Map(operations).set(id, kind);
+    publish({ ...snapshot, operations });
+    try {
+      const result = await action();
+      if (pending) await pending;
+      await refresh();
+      return result;
+    } finally {
+      operations = new Map(operations);
+      operations.delete(id);
+      publish({ ...snapshot, operations });
+    }
+  };
   const refresh = () => {
     if (pending) return pending;
     pending = Promise.resolve().then(load).then((engines) => {
-      publish({ engines, status: "ready" });
+      publish({ ...snapshot, engines, status: "ready" });
     }, () => {
       publish({ ...snapshot, status: "error" });
     }).finally(() => {
@@ -418,6 +434,7 @@ function createEngineCatalog(load = listEngines) {
   return {
     getSnapshot: () => snapshot,
     refresh,
+    runOperation,
     subscribe(listener) {
       listeners.add(listener);
       if (snapshot.status === "idle") void refresh();
@@ -1250,10 +1267,8 @@ var agyLogoutMessages = {
   agy_logout_storage: "engineSettings.agyLogoutStorage"
 };
 function EngineSettings({ engineSource, focusedEngine, t }) {
-  const { engines, status } = (0, import_react5.useSyncExternalStore)(engineSource.subscribe, engineSource.getSnapshot);
+  const { engines, status, operations } = (0, import_react5.useSyncExternalStore)(engineSource.subscribe, engineSource.getSnapshot);
   const headingId = (0, import_react5.useId)();
-  const [checkingId, setCheckingId] = (0, import_react5.useState)(null);
-  const [updatingId, setUpdatingId] = (0, import_react5.useState)(null);
   const [loggingOutKey, setLoggingOutKey] = (0, import_react5.useState)(null);
   const [expandedId, setExpandedId] = (0, import_react5.useState)(focusedEngine || null);
   const [profilesByEngine, setProfilesByEngine] = (0, import_react5.useState)({});
@@ -1365,32 +1380,22 @@ function EngineSettings({ engineSource, focusedEngine, t }) {
     }
   };
   const handleCheck = async (id) => {
-    if (checkingId || updatingId) return;
-    setCheckingId(id);
     setNotice(null);
     try {
-      await checkEngineUpdate(id);
-      await engineSource.refresh();
+      await engineSource.runOperation(id, "check", () => checkEngineUpdate(id));
     } catch (err) {
       setNotice({ text: err.message || t("request.failed"), error: true });
-    } finally {
-      setCheckingId(null);
     }
   };
   const handleUpdate = async (id) => {
-    if (updatingId || checkingId) return;
-    setUpdatingId(id);
     setNotice(null);
     try {
-      const res = await updateEngineCli(id);
-      await engineSource.refresh();
+      const res = await engineSource.runOperation(id, "update", () => updateEngineCli(id));
       if (res?.status?.restartRequired) {
         setNotice({ text: t("engine.restartNeeded"), error: false });
       }
     } catch (err) {
       setNotice({ text: err.message || t("request.failed"), error: true });
-    } finally {
-      setUpdatingId(null);
     }
   };
   const handleStartLogin = async (engineId, { profileId, createProfile } = {}) => {
@@ -1530,17 +1535,17 @@ function EngineSettings({ engineSource, focusedEngine, t }) {
         {
           variant: "outline",
           size: "sm",
-          disabled: Boolean(checkingId) || Boolean(updatingId),
+          disabled: Boolean(operations?.size),
           onClick: () => void handleCheck("all"),
-          children: checkingId === "all" ? t("engine.checking") : t("engineSettings.checkAll")
+          children: operations?.has("all") ? t("engine.checking") : t("engineSettings.checkAll")
         }
       )
     ] }),
     notice && /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("p", { role: notice.error ? "alert" : "status", className: notice.error ? "dchat-archive-error" : void 0, children: notice.text }),
     visibleEngines.length > 0 ? /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("ul", { className: focusedEngine ? "dchat-archive-rows dchat-account-focused" : "dchat-archive-rows", children: visibleEngines.map((eng) => {
       const s = eng.status || {};
-      const isChecking = checkingId === eng.id || checkingId === "all";
-      const isUpdating = updatingId === eng.id;
+      const isChecking = operations?.get(eng.id) === "check" || operations?.has("all");
+      const isUpdating = operations?.get(eng.id) === "update";
       const profiles = profilesByEngine[eng.id] || eng.profiles || [];
       const activeProfileId = eng.defaultProfileId || "default";
       const activeProfile = profiles.find((item) => item.id === activeProfileId);
@@ -1681,7 +1686,7 @@ function EngineSettings({ engineSource, focusedEngine, t }) {
             {
               variant: "outline",
               size: "sm",
-              disabled: isChecking,
+              disabled: isChecking || isUpdating,
               onClick: () => void handleCheck(eng.id),
               children: t("engine.retry")
             }
@@ -19892,6 +19897,8 @@ function createTranscriptFollow(onChange) {
 var import_jsx_runtime50 = require("react/jsx-runtime");
 var noAgents = [];
 var noTools2 = [];
+var nativeSyncEngines = /* @__PURE__ */ new Set(["codex", "agy", "claude"]);
+var nativeSyncStatuses = /* @__PURE__ */ new Set(["synced", "current", "busy", "conflict", "unavailable"]);
 var isBackgroundTool = (tool) => {
   if (!tool) return false;
   if (tool.execution?.background || tool._meta?.background) return true;
@@ -20051,6 +20058,16 @@ function DirectChat({ navigation, startNative, renderFactorySlot, useContextMenu
               }, t }, target.id)
             ] }) }),
             /* @__PURE__ */ (0, import_jsx_runtime50.jsxs)("div", { className: "dchat-header-actions", children: [
+              target.id && nativeSyncEngines.has(current?.engine ?? target.engine) && /* @__PURE__ */ (0, import_jsx_runtime50.jsx)(
+                NativeSyncAction,
+                {
+                  id: target.id,
+                  summary: currentRuntime,
+                  refreshHistory: navigation.refreshHistory,
+                  t
+                },
+                `native-sync-${target.id}`
+              ),
               target.id && /* @__PURE__ */ (0, import_jsx_runtime50.jsx)(RunningJobsAction, { sessionId: target.id, summary: currentRuntime, t }, target.id),
               diffController && /* @__PURE__ */ (0, import_jsx_runtime50.jsx)(WorkspaceDiff, { controller: diffController, t }),
               statusStore && /* @__PURE__ */ (0, import_jsx_runtime50.jsx)(
@@ -20114,6 +20131,113 @@ function DirectChat({ navigation, startNative, renderFactorySlot, useContextMenu
       ),
       /* @__PURE__ */ (0, import_jsx_runtime50.jsx)("aside", { className: "dchat-split-rightbar", style: { width: `${resolvedRightbarWidth}px` }, children: renderRightbar({ useContextMenu, width: resolvedRightbarWidth, viewportWidth, canShow: true, layout: noopRightbarLayout }) })
     ] })
+  ] });
+}
+function NativeSyncAction({ id, summary, refreshHistory, t }) {
+  const [syncing, setSyncing] = (0, import_react45.useState)(false);
+  const [notice, setNotice] = (0, import_react45.useState)(null);
+  const [previewOpen, setPreviewOpen] = (0, import_react45.useState)(false);
+  const request3 = (0, import_react45.useRef)(false);
+  const noticeSequence = (0, import_react45.useRef)(0);
+  const conflict = summary?.nativeConflict || notice?.status === "conflict";
+  const busy = summary?.busy || summary?.pending;
+  const disabled = syncing || !conflict && (!summary?.ready || busy);
+  const label = t(syncing ? "nativeSync.syncing" : conflict ? "nativeSync.view" : busy ? "nativeSync.busy" : "nativeSync.action");
+  const activate = async () => {
+    if (disabled || request3.current) return;
+    if (conflict) {
+      setPreviewOpen(true);
+      return;
+    }
+    request3.current = true;
+    setSyncing(true);
+    setNotice(null);
+    let status = "failed";
+    try {
+      const result = await sessionAction(id, "sync-native", {});
+      if (nativeSyncStatuses.has(result?.status)) status = result.status;
+    } catch {
+    }
+    request3.current = false;
+    setSyncing(false);
+    setNotice({ status, sequence: ++noticeSequence.current });
+    if (status === "synced") void refreshHistory?.();
+  };
+  return /* @__PURE__ */ (0, import_jsx_runtime50.jsxs)(import_jsx_runtime50.Fragment, { children: [
+    /* @__PURE__ */ (0, import_jsx_runtime50.jsx)(import_dsh_client_ui_primitives44.Tooltip, { label, side: "bottom", align: "end", portal: true, children: /* @__PURE__ */ (0, import_jsx_runtime50.jsx)(
+      import_dsh_client_ui_primitives44.Button,
+      {
+        className: "dchat-native-sync",
+        size: "sm",
+        "aria-label": label,
+        "aria-disabled": disabled || void 0,
+        "aria-haspopup": conflict ? "dialog" : void 0,
+        "aria-busy": syncing || void 0,
+        onClick: activate,
+        children: syncing ? /* @__PURE__ */ (0, import_jsx_runtime50.jsx)(import_dsh_client_ui_primitives44.StateDot, { state: "ongoing" }) : conflict ? /* @__PURE__ */ (0, import_jsx_runtime50.jsx)(import_dsh_client_ui_primitives44.IconBranchOutlineRegular, { size: 16 }) : /* @__PURE__ */ (0, import_jsx_runtime50.jsx)(import_dsh_client_ui_primitives44.IconRefreshOutlineRegular, { size: 16 })
+      }
+    ) }),
+    notice && /* @__PURE__ */ (0, import_jsx_runtime50.jsx)(
+      import_dsh_client_ui_primitives44.Toast,
+      {
+        text: t(`nativeSync.${notice.status}`),
+        tone: ["synced", "current"].includes(notice.status) ? "success" : void 0,
+        onDone: () => setNotice(null)
+      },
+      notice.sequence
+    ),
+    previewOpen && /* @__PURE__ */ (0, import_jsx_runtime50.jsx)(NativeHistoryPreview, { id, close: () => setPreviewOpen(false), t })
+  ] });
+}
+function NativeHistoryPreview({ id, close, t }) {
+  const [messages, setMessages] = (0, import_react45.useState)(null);
+  const [failed, setFailed] = (0, import_react45.useState)(false);
+  (0, import_react45.useEffect)(() => {
+    let active = true;
+    sessionAction(id, "native-preview", {}).then((result) => {
+      if (!active) return;
+      if (Array.isArray(result?.messages)) {
+        setMessages(result.messages.filter((message) => message?.role === "user" || message?.role === "assistant"));
+      } else {
+        setFailed(true);
+      }
+    }, () => {
+      if (active) setFailed(true);
+    });
+    return () => {
+      active = false;
+    };
+  }, [id]);
+  return /* @__PURE__ */ (0, import_jsx_runtime50.jsx)(
+    import_dsh_client_ui_primitives44.Modal,
+    {
+      open: true,
+      title: t("nativeSync.previewTitle"),
+      description: t("nativeSync.previewDescription"),
+      closeLabel: t("close"),
+      onClose: close,
+      className: "dchat-native-preview",
+      footer: /* @__PURE__ */ (0, import_jsx_runtime50.jsx)(import_dsh_client_ui_primitives44.Button, { variant: "outline", "data-modal-autofocus": true, onClick: close, children: t("close") }),
+      children: failed ? /* @__PURE__ */ (0, import_jsx_runtime50.jsx)("p", { className: "dchat-error", role: "alert", children: t("nativeSync.previewFailed") }) : messages === null ? /* @__PURE__ */ (0, import_jsx_runtime50.jsx)("p", { className: "dchat-status", role: "status", children: t("nativeSync.previewLoading") }) : !messages.length ? /* @__PURE__ */ (0, import_jsx_runtime50.jsx)("p", { className: "dchat-status", role: "status", children: t("nativeSync.previewEmpty") }) : /* @__PURE__ */ (0, import_jsx_runtime50.jsx)("div", { className: "dchat-native-preview-transcript", tabIndex: 0, "aria-label": t("transcript"), children: messages.map((message, index2) => /* @__PURE__ */ (0, import_jsx_runtime50.jsx)(NativePreviewMessage, { message, t }, index2)) })
+    }
+  );
+}
+function NativePreviewMessage({ message, t }) {
+  const { text, role, thought, tools } = message;
+  return /* @__PURE__ */ (0, import_jsx_runtime50.jsxs)("article", { className: "dchat-native-preview-message", "aria-label": t(role === "user" ? "you" : "nativeSync.assistant"), children: [
+    /* @__PURE__ */ (0, import_jsx_runtime50.jsx)("h3", { children: t(role === "user" ? "you" : "nativeSync.assistant") }),
+    typeof thought === "string" && thought && /* @__PURE__ */ (0, import_jsx_runtime50.jsxs)("details", { children: [
+      /* @__PURE__ */ (0, import_jsx_runtime50.jsx)("summary", { children: t("thought") }),
+      /* @__PURE__ */ (0, import_jsx_runtime50.jsx)("p", { children: thought })
+    ] }),
+    Array.isArray(tools) && tools.length > 0 && /* @__PURE__ */ (0, import_jsx_runtime50.jsxs)("details", { children: [
+      /* @__PURE__ */ (0, import_jsx_runtime50.jsx)("summary", { children: t("nativeSync.tools", { count: tools.length }) }),
+      /* @__PURE__ */ (0, import_jsx_runtime50.jsx)("ul", { children: tools.map((tool, index2) => /* @__PURE__ */ (0, import_jsx_runtime50.jsxs)("li", { children: [
+        t(Object.hasOwn(toolIcons, tool?.kind) ? `activity.${tool.kind}` : "permission.tool"),
+        ["pending", "in_progress", "completed", "failed"].includes(tool?.status) && ` \xB7 ${t(tool.status)}`
+      ] }, index2)) })
+    ] }),
+    typeof text === "string" && text && /* @__PURE__ */ (0, import_jsx_runtime50.jsx)("p", { children: text })
   ] });
 }
 function SessionPane({ queueDock, onAgentSummary, onRuntimeSummary, target, navigation, startNative, performanceSettings, submissionSettings = defaultSubmissionSettings, onSession, renderFactorySlot, workspaceSource, engine, engines, engineStatus, engineSource, reloadEngines, diffController, t }) {
@@ -20660,6 +20784,7 @@ function SessionPane({ queueDock, onAgentSummary, onRuntimeSummary, target, navi
   const stopCurrentTurn = (0, import_react45.useCallback)(() => {
     void performRef.current("cancel");
   }, []);
+  const nativeConflict = session?.nativeConflict === true;
   (0, import_react45.useEffect)(() => {
     if (!blank && id) onAgentSummary({ id, agents, ready, error: connectionError });
   }, [blank, id, agents, ready, connectionError, onAgentSummary]);
@@ -20668,10 +20793,14 @@ function SessionPane({ queueDock, onAgentSummary, onRuntimeSummary, target, navi
       onRuntimeSummary({
         id,
         tools: runtimeTools,
+        ready,
+        busy,
+        pending,
+        nativeConflict,
         stop: busy && ready && !pending ? stopCurrentTurn : null
       });
     }
-  }, [blank, id, runtimeTools, busy, ready, pending, stopCurrentTurn, onRuntimeSummary]);
+  }, [blank, id, runtimeTools, busy, ready, pending, nativeConflict, stopCurrentTurn, onRuntimeSummary]);
   const resolvedActiveTurn = activeTurn ?? turnItems.at(-1)?.turn ?? null;
   return /* @__PURE__ */ (0, import_jsx_runtime50.jsxs)(import_jsx_runtime50.Fragment, { children: [
     /* @__PURE__ */ (0, import_jsx_runtime50.jsxs)("div", { className: "dchat-transcript-area", hidden: blank, children: [
@@ -23207,6 +23336,22 @@ var en4 = {
   "history.retry": "Reload history",
   "session.readOnly": "Read-only conversation.",
   "session.archived": "Archived. Restore this session to continue.",
+  "nativeSync.action": "Sync CLI history",
+  "nativeSync.syncing": "Syncing CLI history\u2026",
+  "nativeSync.synced": "CLI history synced.",
+  "nativeSync.current": "CLI history is already up to date.",
+  "nativeSync.busy": "Sync CLI history when the current work finishes.",
+  "nativeSync.conflict": "CLI history has diverged. You can view the CLI branch.",
+  "nativeSync.unavailable": "CLI history is unavailable for this conversation.",
+  "nativeSync.failed": "Could not sync CLI history.",
+  "nativeSync.view": "View CLI branch",
+  "nativeSync.previewTitle": "CLI branch",
+  "nativeSync.previewDescription": "Read-only transcript of the CLI branch.",
+  "nativeSync.previewLoading": "Loading CLI history\u2026",
+  "nativeSync.previewFailed": "Could not load the CLI branch.",
+  "nativeSync.previewEmpty": "The CLI branch has no messages to display.",
+  "nativeSync.assistant": "Assistant",
+  "nativeSync.tools": "Tool activity ({count})",
   cwd: "Working directory",
   "cwd.default": "Host home directory",
   connecting: "Connecting\u2026",
@@ -23524,6 +23669,22 @@ var zh4 = {
   "history.retry": "\u91CD\u65B0\u52A0\u8F7D\u5386\u53F2",
   "session.archived": "\u4F1A\u8BDD\u5DF2\u5F52\u6863\uFF0C\u6062\u590D\u540E\u53EF\u7EE7\u7EED\u5BF9\u8BDD\u3002",
   "session.readOnly": "\u6B64\u4F1A\u8BDD\u4E3A\u53EA\u8BFB\u3002",
+  "nativeSync.action": "\u540C\u6B65 CLI \u8BB0\u5F55",
+  "nativeSync.syncing": "\u6B63\u5728\u540C\u6B65 CLI \u8BB0\u5F55\u2026",
+  "nativeSync.synced": "\u5DF2\u540C\u6B65 CLI \u8BB0\u5F55\u3002",
+  "nativeSync.current": "CLI \u8BB0\u5F55\u5DF2\u662F\u6700\u65B0\u3002",
+  "nativeSync.busy": "\u5F53\u524D\u4EFB\u52A1\u7ED3\u675F\u540E\u53EF\u540C\u6B65 CLI \u8BB0\u5F55\u3002",
+  "nativeSync.conflict": "CLI \u4E0E\u7F51\u9875\u7684\u4F1A\u8BDD\u8BB0\u5F55\u5DF2\u5206\u53C9\uFF0C\u53EF\u67E5\u770B CLI \u5206\u652F\u3002",
+  "nativeSync.unavailable": "\u6B64\u4F1A\u8BDD\u7684 CLI \u8BB0\u5F55\u4E0D\u53EF\u7528\u3002",
+  "nativeSync.failed": "\u65E0\u6CD5\u540C\u6B65 CLI \u8BB0\u5F55\u3002",
+  "nativeSync.view": "\u67E5\u770B CLI \u5206\u652F",
+  "nativeSync.previewTitle": "CLI \u5206\u652F",
+  "nativeSync.previewDescription": "CLI \u5206\u652F\u7684\u53EA\u8BFB\u4F1A\u8BDD\u8BB0\u5F55\u3002",
+  "nativeSync.previewLoading": "\u6B63\u5728\u52A0\u8F7D CLI \u8BB0\u5F55\u2026",
+  "nativeSync.previewFailed": "\u65E0\u6CD5\u52A0\u8F7D CLI \u5206\u652F\u3002",
+  "nativeSync.previewEmpty": "CLI \u5206\u652F\u6CA1\u6709\u53EF\u663E\u793A\u7684\u6D88\u606F\u3002",
+  "nativeSync.assistant": "\u52A9\u624B",
+  "nativeSync.tools": "\u5DE5\u5177\u6D3B\u52A8\uFF08{count} \u9879\uFF09",
   cwd: "\u5DE5\u4F5C\u76EE\u5F55",
   "cwd.default": "\u4E3B\u673A\u7528\u6237\u76EE\u5F55",
   connecting: "\u6B63\u5728\u8FDE\u63A5\u2026",
@@ -24310,6 +24471,19 @@ html [data-sidebar-drawer] .dchat-title {
 
 .dchat-header-actions {
   flex: 0 0 auto;
+}
+
+.dchat-header-actions .dchat-native-sync {
+  box-sizing: border-box;
+  justify-content: center;
+  inline-size: 28px;
+  padding: 0;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.dchat-header-actions .dchat-native-sync[aria-disabled="true"] {
+  color: var(--dsw-alias-label-tertiary);
+  cursor: default;
 }
 
 .dchat-agent-catalog {
@@ -25441,6 +25615,50 @@ html [data-sidebar-drawer] .dchat-title {
 .dchat-file-dialog {
   width: min(760px, 100%);
   max-height: 100%;
+}
+
+.dchat-native-preview {
+  width: min(680px, 100%);
+  max-height: 100%;
+  overflow-y: auto;
+}
+
+.dchat-native-preview-transcript {
+  display: grid;
+  gap: 12px;
+  max-height: min(52dvh, 540px);
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 2px;
+}
+
+.dchat-native-preview-message {
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: var(--dsw-radius-sm);
+  overflow-wrap: anywhere;
+}
+
+.dchat-native-preview-message h3 {
+  margin: 0 0 6px;
+  font-size: 12px;
+  font-weight: 550;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.dchat-native-preview-message p {
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+.dchat-native-preview-message details {
+  margin-block-end: 6px;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.dchat-native-preview-message summary {
+  cursor: pointer;
 }
 
 .dchat-file-dialog-content {

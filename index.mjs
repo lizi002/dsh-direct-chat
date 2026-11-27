@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto'
 import { closeSync, copyFileSync, constants, existsSync, fstatSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { homedir } from 'node:os'
-import { basename, isAbsolute, join, relative, sep } from 'node:path'
+import { basename, dirname, isAbsolute, join, relative, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { isDeepStrictEqual } from 'node:util'
 import { stripVTControlCharacters } from 'node:util'
@@ -38,6 +38,7 @@ function compareSemver(a, b) {
 import { workspaceDiff, workspaceDiffText } from './server/workspace-diff.mjs'
 import { createWorkspaceWorktree, gitBranchInfo } from './server/workspace-worktree.mjs'
 import { imageType, listWorkspaceDirectory, openMediaFile, sendDocument, sendDownload, sendMedia, previewFile } from './server/workspace-file.mjs'
+import { compareNativeHistory, compareNativeTail, formatFilePrompt } from './server/native-merge.mjs'
 import { nativeCatalog, nativeId, nativeUuid } from './server/native-history.mjs'
 import { commandExecution, completeExecution, toolLocations } from './server/tool-activity.mjs'
 
@@ -1469,9 +1470,123 @@ export function apply(ctx, config = {}) {
     if (notify && s.clients.size) broadcast(s,'snapshot',snapshot(s))
     return true
   }
-  async function syncImportedFromEntry(s, entry) {
+  function nativeSyncBusy(s) {
+    return s.busy || s.opening || s.forking || s.cancelling || s.switchingAccount ||
+      s.permissions.size > 0 || hasPendingTools(s)
+  }
+  function releaseNativeAdapter(s) {
+    const adapter = s.adapter
+    if (!adapter) return
+    s.adapter = null
+    s.view = undefined
+    s.closing = Promise.resolve().then(() => adapter.close()).catch(() => {}).finally(() => { s.closing = null })
+  }
+  async function nativeEntryFor(r, force = false) {
+    if (!r.remoteId) return
+    const provider = engines.get(r.engine)
+    if (!provider) return
+    if (['agy', 'codex', 'claude'].includes(r.engine)) {
+      const id = r.engine === 'agy' ? agyHistoryProfileId(r) : sessionProfileId(r)
+      const settings = engineProfiles(r.engine)
+      const profile = sessionProfiles(provider, settings).find(item => item.id === id)
+      if (!profile) return
+      const env = profileSettings(profile, settings.overrides).env
+      const home = env.HOME || env.USERPROFILE
+      const privateHome = profile.kind === 'isolated' ? join(store, 'profiles', r.engine, id) : undefined
+      let directory
+      if (r.engine === 'agy' && (privateHome || home)) directory = agyDataDirectory(privateHome || home)
+      if (r.engine === 'codex') directory = privateHome || env.CODEX_HOME || (home && join(home, '.codex'))
+      if (r.engine === 'claude') directory = privateHome || env.CLAUDE_CONFIG_DIR || (home && join(home, '.claude'))
+      if (directory || (force && provider.history)) return catalog.findInDirectory(r.engine, r.remoteId, directory)
+    }
+    return (await catalog.list()).get(nativeId(r.engine, r.remoteId))
+  }
+  function nativeRevision(entry) {
+    let source = entry.file
+    if (source && entry.engine === 'agy') {
+      const logs = join(dirname(source), 'brain', entry.remoteId, '.system_generated', 'logs')
+      source = ['transcript_full.jsonl', 'transcript.jsonl'].map(name => join(logs, name)).find(existsSync)
+    }
+    const stat = source && statSync(source, { throwIfNoEntry: false })
+    return [entry.updatedAt, source, stat?.size, stat?.mtimeMs].join('|')
+  }
+  async function mergeNativeContinuation(s, entry, force) {
+    const r = s.record
+    if (!entry || !r.remoteId || !r.messages.length || nativeSyncBusy(s)) return false
+    if (s.nativeSync) return s.nativeSync
+    const revision = nativeRevision(entry)
+    const web = r.messages
+    const length = web.length
+    const updatedAt = r.updatedAt
+    const account = sessionProfileId(r)
+    const check = s.nativeMergeCheck
+    if (!force && check?.revision === revision && check.web === web && check.length === length && check.updatedAt === updatedAt) return false
+    s.nativeSync = (async () => {
+      const rows = await catalog.messages(entry).catch(() => undefined)
+      requirePresent(r.id, r)
+      if (!rows?.length) {
+        s.nativeReadUnavailable = true
+        return false
+      }
+      s.nativeReadUnavailable = false
+      const native = compactMessages(rows)
+      if (nativeSyncBusy(s) || r.messages !== web || web.length !== length || r.updatedAt !== updatedAt ||
+          r.remoteId !== entry.remoteId || sessionProfileId(r) !== account) return false
+      const start = r.nativeTailStart ?? length
+      let result = compareNativeHistory(web.slice(0, start), native, {
+        attachmentPath: attachment => {
+          const file = attachmentFilename(attachment)
+          return file && join(mediaRoot, r.id, file)
+        },
+      })
+      if (r.nativeTailStart != null && result.status === 'synced') {
+        result = compareNativeTail(web.slice(start), result.additions)
+      }
+      const wasConflict = s.nativeConflict
+      s.nativeConflict = result.status === 'conflict'
+      if (result.status === 'synced') {
+        const next = { ...r, messages: [...web.slice(0, start), ...result.additions], nativeTailStart: start,
+          updatedAt: Math.max(updatedAt || 0, entry.updatedAt || 0) }
+        save(s, next, true)
+        Object.assign(r, next)
+        releaseNativeAdapter(s)
+      }
+      s.nativeMergeCheck = { revision, web: r.messages, length: r.messages.length, updatedAt: r.updatedAt }
+      if (Boolean(wasConflict) !== s.nativeConflict || result.status === 'synced') broadcast(s, 'snapshot', snapshot(s))
+      return result.status === 'synced'
+    })().finally(() => { s.nativeSync = null })
+    return s.nativeSync
+  }
+  async function syncImportedFromEntry(s, entry, force = false) {
     const r = s.record
     const isolatedAgy = r.engine === 'agy' && agyHistoryProfileId(r) !== 'default'
+    if (['codex', 'agy'].includes(r.engine) && (!r.imported || r.hasWebTurns || isolatedAgy)) {
+      return mergeNativeContinuation(s, entry, force)
+    }
+    if (entry && r.engine === 'claude' && (!r.imported || r.hasWebTurns)) {
+      const readTerminal = engines.get('claude')?.history?.terminalMessages
+      const previous = r.claudeTerminalTail
+      const updatedAt = r.updatedAt
+      const since = previous?.since ?? updatedAt
+      const unavailable = () => r.remoteId !== entry.remoteId || s.busy || s.opening || s.forking ||
+        s.cancelling || s.switchingAccount || hasPendingTools(s)
+      if (!readTerminal || unavailable() || entry.updatedAt <= (previous?.modified ?? updatedAt)) return false
+      if (s.nativeSync) return s.nativeSync
+      s.nativeSync = (async () => {
+        const messages = compactMessages(await readTerminal(entry, since))
+        requirePresent(r.id, r)
+        if (!messages.length || unavailable() || r.updatedAt !== updatedAt || r.claudeTerminalTail !== previous) return false
+        const start = previous?.start ?? r.messages.length
+        r.messages = [...r.messages.slice(0, start), ...messages]
+        r.claudeTerminalTail = { since, start, modified: entry.updatedAt }
+        r.updatedAt = entry.updatedAt
+        // The next web prompt must resume the transcript with the terminal turns included.
+        releaseNativeAdapter(s)
+        save(s)
+        return true
+      })().finally(() => { s.nativeSync = null })
+      return s.nativeSync
+    }
     if (!entry || !r.imported || r.hasWebTurns || isolatedAgy ||
         s.busy || s.opening || s.forking || s.cancelling || s.switchingAccount || hasPendingTools(s)) {
       return false
@@ -1506,15 +1621,15 @@ export function apply(ctx, config = {}) {
         r.metrics = {}
       }
       if (!s.importViewOnly) save(s)
+      if (['codex', 'agy'].includes(r.engine)) releaseNativeAdapter(s)
       return true
     })().finally(() => { s.nativeSync = null })
     return s.nativeSync
   }
   async function refreshNativeMetadata(s) {
-    const {engine,remoteId,parentId}=s.record
+    const {remoteId,parentId}=s.record
     if (!remoteId || parentId) return
-    if (engine === 'agy' && agyHistoryProfileId(s.record) !== 'default') return
-    const entry=(await catalog.list()).get(nativeId(engine,remoteId))
+    const entry=await nativeEntryFor(s.record)
     if (!entry || s.record.remoteId!==remoteId) return
     const wasArchived=isArchived(s.record)
     syncArchived(s.record,entry)
@@ -1710,7 +1825,7 @@ export function apply(ctx, config = {}) {
       : s.updates
     const waitingForAgyCatalog = engine === 'agy' && !s.adapter && !isArchived(s.record) && s.record.resumable !== false
     const visibleOptions = waitingForAgyCatalog ? (options ?? []).filter(option => !['model','thought_level'].includes(option.category ?? option.id)) : view?.options ?? options
-    return { id, engine, title, cwd, messages, options:visibleOptions, account:sessionAccount(s), canFork:canFork(s.record) && !isArchived(s.record), historyNotice:s.record.historyNotice, createdAt:s.record.createdAt, updatedAt:s.record.updatedAt, archived:isArchived(s.record), metrics:s.record.metrics || {}, agents:agentList(s), parentId:s.record.parentId,
+    return { id, engine, title, cwd, messages, nativeConflict:Boolean(s.nativeConflict), options:visibleOptions, account:sessionAccount(s), canFork:canFork(s.record) && !isArchived(s.record), historyNotice:s.record.historyNotice, createdAt:s.record.createdAt, updatedAt:s.record.updatedAt, archived:isArchived(s.record), metrics:s.record.metrics || {}, agents:agentList(s), parentId:s.record.parentId,
       capabilities:{...(view?.capabilities ?? s.record.capabilitiesMedia),readOnly:s.record.resumable===false || isArchived(s.record),parallel:s.record.resumable!==false && !s.record.parentId && messages.length>0,steer:typeof s.adapter?.steer === 'function'},
       busy: s.busy, runStartedAt: s.busy ? (s.turnStartedAt ?? undefined) : undefined, permissions: [...s.permissions.values()], updates, queue:s.record.queue, queuePaused:s.queuePaused }
   }
@@ -1877,7 +1992,7 @@ export function apply(ctx, config = {}) {
         if (type === 'file') references.push({name,mimeType,path})
         return metadata
       })
-      const prompt = references.length ? `${text ? text + '\n\n' : ''}Attached files (local paths):\n${JSON.stringify(references)}` : text
+      const prompt = formatFilePrompt(text, references)
       return { prompt, media:files.filter(file => file.type !== 'file'), discard,
         message:{role:'user',text,...(attachments.length ? {attachments} : {})} }
     } catch (error) {
@@ -1895,6 +2010,8 @@ export function apply(ctx, config = {}) {
       metrics: record.metrics || {},
       ...(item ? {queue:record.queue.filter(row=>row!==item)} : {}),
       ...(record.imported ? {hasWebTurns:true} : {}),
+      ...(record.claudeTerminalTail ? {claudeTerminalTail:undefined} : {}),
+      ...(record.nativeTailStart != null ? {nativeTailStart:undefined} : {}),
     }
     // Acknowledged steering already entered the engine, even if local persistence fails.
     if (steering) {
@@ -2271,7 +2388,7 @@ export function apply(ctx, config = {}) {
     if (record.engine !== 'agy' && !record.messages.some(message => message.tools?.length ||
         message.steps?.some(step => step?.kind === 'tool'))) return
     const historyProfile = record.engine === 'agy' ? agyHistoryProfileId(record) : undefined
-    if (historyProfile && historyProfile !== 'default' && nativeUuid.test(record.remoteId)) {
+    if (!entry && historyProfile && historyProfile !== 'default' && nativeUuid.test(record.remoteId)) {
       try {
         const directory = agyHistoryDirectory(record, engines.get('agy'))
         entry = { engine: 'agy', remoteId: record.remoteId, file: join(directory, 'conversation_summaries.db') }
@@ -2293,15 +2410,17 @@ export function apply(ctx, config = {}) {
     })().finally(() => { session.historyRepair = undefined })
     await session.historyRepair
   }
-  async function lookup(id) {
+  async function lookup(id, refreshBeforePrompt = false) {
     const existing=sessions.get(id)
     if (existing?.switchingAccount) return existing
+    const force = Boolean(refreshBeforePrompt && existing?.record.messages.length &&
+      ['codex', 'agy'].includes(existing.record.engine) && !nativeSyncBusy(existing))
     const isolatedAgyHistory = existing?.record.engine === 'agy' && agyHistoryProfileId(existing.record) !== 'default'
     if (!id?.startsWith('local-') || existing?.busy || existing?.adapter || existing?.opening || isolatedAgyHistory) {
       if (existing?.record.remoteId) {
         const r=existing.record
-        const entry=isolatedAgyHistory ? undefined : (await catalog.list()).get(nativeId(r.engine,r.remoteId))
-        if (!(await syncImportedFromEntry(existing,entry))) {
+        const entry=await nativeEntryFor(r, force)
+        if (!(await syncImportedFromEntry(existing,entry,force))) {
           await repairHistory(existing,entry)
         }
         if (!r.parentId) {
@@ -2314,13 +2433,13 @@ export function apply(ctx, config = {}) {
       }
       return existing
     }
-    const entry=(await catalog.list()).get(id) ?? (await catalog.list(true)).get(id)
+    const entry=existing ? await nativeEntryFor(existing.record, force) : (await catalog.list()).get(id) ?? (await catalog.list(true)).get(id)
     requirePresent(id,entry ?? existing?.record)
     if (!entry) return existing
     const version = transcriptVersion(entry.engine)
     if(existing && (existing.record.hasWebTurns ||
       (existing.record.sourceModified >= entry.updatedAt && existing.record.transcriptVersion === version))) {
-      await repairHistory(existing,entry)
+      if (!(await syncImportedFromEntry(existing,entry,force))) await repairHistory(existing,entry)
       await loadMissingMetrics(existing,entry)
       requirePresent(id,entry)
       existing.record.parentId=localIdFor(entry.engine,entry.nativeParent) ?? existing.record.parentId
@@ -2980,7 +3099,33 @@ export function apply(ctx, config = {}) {
       const size=report.size ?? [existing,metrics].find(row=>row?.size && (!report.model || !row.model || report.model===row.model))?.size
       return json(res,200,{...report,size})
     }
-    const s = await lookup(id)
+    if ((action === 'sync-native' || action === 'native-preview') && req.method === 'POST') {
+      const s = sessions.get(id) ?? await lookup(id)
+      if (!s) throw reject(404, 'Unknown session')
+      const r = s.record
+      requirePresent(id, r)
+      if (!['agy', 'codex', 'claude'].includes(r.engine)) throw reject(400, 'Unsupported engine')
+      if (action === 'sync-native' && nativeSyncBusy(s)) return json(res, 200, { status: 'busy' })
+      const account = sessionProfileId(r)
+      const entry = await nativeEntryFor(r, true)
+      requirePresent(id, r)
+      if (!entry || entry.remoteId !== r.remoteId || account !== sessionProfileId(r)) {
+        if (action === 'native-preview') throw reject(404, 'Native history unavailable')
+        return json(res, 200, { status: 'unavailable' })
+      }
+      if (action === 'native-preview') {
+        const messages = (await catalog.messages(entry)).map(({ role, text, thought, tools }) => ({
+          role, text, ...(thought ? { thought } : {}), ...(tools?.length ? { tools: tools.map(({ kind, status }) => ({ kind, status })) } : {}),
+        }))
+        requirePresent(id, r)
+        if (account !== sessionProfileId(r) || entry.remoteId !== r.remoteId) throw reject(409, 'Session changed')
+        return json(res, 200, { messages })
+      }
+      const changed = await syncImportedFromEntry(s, entry, true)
+      broadcast(s, 'snapshot', snapshot(s))
+      return json(res, 200, { status: nativeSyncBusy(s) ? 'busy' : s.nativeReadUnavailable ? 'unavailable' : s.nativeConflict ? 'conflict' : changed ? 'synced' : 'current' })
+    }
+    const s = await lookup(id, action === 'prompt' && req.method === 'POST')
     if (!s) throw reject(404, 'Unknown session')
     requirePresent(id,s.record)
     if (action === 'mcp' && req.method === 'GET') {

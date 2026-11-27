@@ -30,7 +30,7 @@ test('authenticated sessions persist replies, serialize prompts and restore the 
     export {openNativeDatabase} from ${JSON.stringify(new URL('../server/native-history.mjs', import.meta.url).href)}
     export const nativeUuid=/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i
     export function nativeId(engine, remoteId){return 'local-'+engine+'-'+remoteId}
-    export function nativeCatalog(){return {messages:async entry=>rowsByFile.get(entry?.file)??historyRows,metrics:async()=>undefined,context:async entry=>entry?.remoteId==='remote-session' ? context : undefined,refreshEngine:async()=>{},list:async()=>{
+    export function nativeCatalog(){return {findInDirectory:async(engine,remoteId,directory)=>({engine,remoteId,file:directory+"/conversation_summaries.db",updatedAt:250}),messages:async entry=>rowsByFile.get(entry?.file)??historyRows,metrics:async()=>undefined,context:async entry=>entry?.remoteId==='remote-session' ? context : undefined,refreshEngine:async()=>{},list:async()=>{
       const id=nativeId('agy','remote-session')
       const entries=new Map(title || archived!==undefined ? [[id,{id,engine:'agy',remoteId:'remote-session',title,nativeTitle:title,archived,updatedAt:100}]]:[])
       if (indexedEntry) entries.set(indexedEntry.id,indexedEntry)
@@ -43,6 +43,7 @@ test('authenticated sessions persist replies, serialize prompts and restore the 
   await copyFile(new URL('../index.mjs',import.meta.url), join(dir,'index.mjs'))
   await copyFile(new URL('../server/codex-commands.mjs',import.meta.url), join(dir,'server','codex-commands.mjs'))
   await copyFile(new URL('../server/workspace-diff.mjs',import.meta.url), join(dir,'server','workspace-diff.mjs'))
+  await copyFile(new URL('../server/native-merge.mjs',import.meta.url), join(dir,'server','native-merge.mjs'))
   await copyFile(new URL('../server/workspace-worktree.mjs',import.meta.url), join(dir,'server','workspace-worktree.mjs'))
   await copyFile(new URL('../server/workspace-file.mjs',import.meta.url), join(dir,'server','workspace-file.mjs'))
   await copyFile(new URL('../server/agy-session-history.mjs',import.meta.url),join(dir,'server','agy-session-history.mjs'))

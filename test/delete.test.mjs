@@ -52,7 +52,7 @@ test('confirmed native deletion serializes changes and clears only the verified 
   await Promise.all([
     'index.mjs', 'engines/cli-admin.mjs',
     'server/agy-session-history.mjs', 'server/account-usage-cache.mjs', 'server/tool-activity.mjs',
-    'server/workspace-file.mjs', 'server/workspace-worktree.mjs', 'server/workspace-diff.mjs', 'server/codex-commands.mjs',
+    'server/workspace-file.mjs', 'server/workspace-worktree.mjs', 'server/native-merge.mjs', 'server/workspace-diff.mjs', 'server/codex-commands.mjs',
   ].map(name=>copyFile(new URL('../'+name,import.meta.url),join(temp,name))))
   await writeFile(join(temp,'server','native-history.mjs'), `
     export { nativeId, nativeUuid, openNativeDatabase } from ${JSON.stringify(new URL('../server/native-history.mjs',import.meta.url).href)}

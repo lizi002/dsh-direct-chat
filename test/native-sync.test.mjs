@@ -9,7 +9,7 @@ import { test } from 'node:test'
 import { pathToFileURL } from 'node:url'
 import { nativeId } from '../server/native-history.mjs'
 
-test('imported AGY session reloads newer native messages even while adapter is open, until web turns begin', async t => {
+test('web and imported sessions synchronize terminal history and resume the same native conversation', async t => {
   const temp = await mkdtemp(join(tmpdir(), 'dchat-native-sync-'))
   const store = join(temp, 'direct-chat')
   const savedHome = process.env.DSH_HOME
@@ -46,28 +46,37 @@ test('imported AGY session reloads newer native messages even while adapter is o
   await Promise.all([
     'index.mjs', 'engines/cli-admin.mjs',
     'server/agy-session-history.mjs', 'server/account-usage-cache.mjs', 'server/tool-activity.mjs',
-    'server/workspace-file.mjs', 'server/workspace-worktree.mjs', 'server/workspace-diff.mjs', 'server/codex-commands.mjs',
+    'server/workspace-file.mjs', 'server/workspace-worktree.mjs', 'server/native-merge.mjs', 'server/workspace-diff.mjs', 'server/codex-commands.mjs',
   ].map(name => copyFile(new URL('../' + name, import.meta.url), join(temp, name))))
 
   await writeFile(join(temp, 'server', 'native-history.mjs'), `
     export { nativeId, nativeUuid, openNativeDatabase } from ${JSON.stringify(new URL('../server/native-history.mjs', import.meta.url).href)}
     export const entries = new Map(${JSON.stringify([[id, entry]])})
+    export const scopedEntries = new Map()
     export const nativeCatalog = () => ({
+      async findInDirectory(engine, remoteId, directory) { return directory ? scopedEntries.get(directory + '/' + remoteId) : [...entries.values()].find(e => e.engine === engine && e.remoteId === remoteId) },
       async list() { return new Map(entries) },
       async refreshEngine() {},
       async children() { return [] },
       async metrics(item) { return item.metrics },
-      async messages(item) { return item.messages },
+      async messages(item) { return item.messages ?? [] },
     })
   `)
   await writeFile(join(temp, 'registry.mjs'), `
+    import { entries } from './server/native-history.mjs'
+    export const resumed = []
     export let settlePrompt
-    async function start({ resumeId }) {
+    async function start({ resumeId, emit }) {
+      const context = [...entries.values()].find(row => row.remoteId === resumeId)?.messages.map(m => m.text) || []
+      resumed.push({ resumeId, context })
       return {
         id: resumeId,
         options: [],
         async close() {},
-        prompt() {
+        async configure() { return [] },
+        prompt(text) {
+          if (text === 'what was the word?') emit('update', { update: { sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: context.find(value => value.startsWith('remember '))?.slice(9) || 'unknown' } } })
           const p = Promise.withResolvers()
           settlePrompt = p.resolve
           return p.promise
@@ -75,7 +84,8 @@ test('imported AGY session reloads newer native messages even while adapter is o
       }
     }
     const agy = { id: 'agy', label: 'Antigravity', start }
-    const engines = new Map([[agy.id, agy]])
+    const claude = { id: 'claude', history: { terminalMessages: entry => entry.messages } }
+    const engines = new Map([[agy.id, agy], [claude.id, claude], ['codex', { id: 'codex', start }]])
     export const createEngineRegistry = () => ({
       ready: Promise.resolve(),
       has: key => engines.has(key),
@@ -87,8 +97,82 @@ test('imported AGY session reloads newer native messages even while adapter is o
   const { apply } = await import(pathToFileURL(join(temp, 'index.mjs')))
   const historyMod = await import(pathToFileURL(join(temp, 'server', 'native-history.mjs')))
   const registry = await import(pathToFileURL(join(temp, 'registry.mjs')))
+  const webId = randomUUID()
+  const claudeRemote = randomUUID()
+  const webMessage = { role: 'user', text: 'from web', attachments: [{ name: 'image.png' }] }
+  const webRecord = { id: webId, engine: 'claude', remoteId: claudeRemote, cwd: temp, title: 'Web',
+    updatedAt: 1000, messages: [webMessage], options: [], capabilities: [], queue: [] }
+  await writeFile(join(store, webId + '.json'), JSON.stringify(webRecord))
+  const terminalEntry = { ...entry, engine: 'claude', remoteId: claudeRemote,
+    messages: [{ role: 'user', text: 'terminal follow-up' }] }
+  historyMod.entries.set(nativeId('claude', claudeRemote), terminalEntry)
+  const saved = {}
+  const isolated = 'isolated-fixture'
+  const remoteByEngine = {}
+  for (const key of ['codex', 'agy', 'isolated']) {
+    const engine = key === 'isolated' ? 'agy' : key
+    const rid = randomUUID()
+    const local = randomUUID()
+    const entry = { id: nativeId(engine, rid), remoteId: rid, engine, updatedAt: 2200, cwd: temp,
+      messages: [...initialMessages, { role: 'user', text: 'remember hazelnut' }, { role: 'assistant', text: 'stored' }] }
+    saved[key] = local
+    remoteByEngine[key] = entry
+    if (key === 'isolated') {
+      const directory = join(store, 'profiles', 'agy', isolated, '.gemini', 'antigravity-cli')
+      historyMod.scopedEntries.set(directory + '/' + rid, entry)
+      historyMod.entries.set(entry.id, { ...entry, messages: [{ role: 'user', text: 'wrong account' }] })
+    } else historyMod.entries.set(entry.id, entry)
+    await writeFile(join(store, local + '.json'), JSON.stringify({ ...webRecord, id: local, engine, remoteId: rid,
+      messages: initialMessages, ...(key === 'isolated' ? { profileId: 'default', agyHistoryProfileId: isolated } : {}) }))
+  }
+  await writeFile(join(store, 'profiles.json'), JSON.stringify({ agy: { list: [{ id: isolated, kind: 'isolated', name: 'Work' }] } }))
   const { call, openEvents, dispose } = mount(apply)
   t.after(dispose)
+
+  assert.deepEqual((await call('GET', '/' + webId)).data.messages, [webMessage, ...terminalEntry.messages])
+  terminalEntry.messages.push({ role: 'assistant', text: 'terminal reply' })
+  terminalEntry.updatedAt++
+  for (let i = 0; i < 2; i++) {
+    assert.deepEqual((await call('GET', '/' + webId)).data.messages, [webMessage, ...terminalEntry.messages])
+  }
+
+  for (const key of ['codex', 'agy', 'isolated']) {
+    const path = '/' + saved[key]
+    const terminal = remoteByEngine[key]
+    if (key !== 'isolated') {
+      const additions = terminal.messages.splice(2)
+      const stream = openEvents(saved[key])
+      t.after(() => stream.close())
+      await new Promise(resolve => setTimeout(resolve, 30))
+      // A pre-existing adapter loaded the old context.
+      if (key === 'codex') await call('POST', path + '/configure', { id: 'fixture', value: 'fixture' })
+      terminal.messages.push(...additions)
+      terminal.updatedAt++
+    }
+    assert.equal((await call('POST', path + '/sync-native')).data.status, 'synced')
+    const loaded = await call('GET', path)
+    assert.equal(loaded.status, 200, key + ': ' + loaded.data.error)
+    assert.deepEqual(loaded.data.messages, terminal.messages)
+    assert.equal((await call('POST', path + '/sync-native')).data.status, 'current')
+    if (key === 'isolated') {
+      historyMod.scopedEntries.clear()
+      assert.equal((await call('POST', path + '/sync-native')).data.status, 'unavailable')
+      assert.equal((await call('POST', path + '/native-preview')).status, 404)
+      continue
+    }
+    assert.equal((await call('POST', path + '/prompt', { text: 'what was the word?' })).status, 202)
+    assert.equal(registry.resumed.at(-1).resumeId, terminal.remoteId)
+    assert.ok(registry.resumed.at(-1).context.includes('remember hazelnut'))
+    assert.equal((await call('POST', path + '/sync-native')).data.status, 'busy')
+    registry.settlePrompt({ stopReason: 'end_turn' })
+    await new Promise(resolve => setImmediate(resolve))
+    terminal.messages = [{ role: 'user', text: 'separate branch' }]
+    terminal.updatedAt++
+    assert.equal((await call('POST', path + '/sync-native')).data.status, 'conflict')
+    assert.equal((await call('GET', path)).data.nativeConflict, true)
+    assert.equal((await call('GET', path)).data.messages.at(-1).text, 'hazelnut')
+    assert.deepEqual((await call('POST', path + '/native-preview')).data.messages, terminal.messages)
+  }
 
   // Initial load via GET + events opens the AGY adapter while keeping hasWebTurns false.
   const first = await call('GET', `/${id}`)

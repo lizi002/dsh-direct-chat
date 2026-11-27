@@ -120,6 +120,19 @@ html [data-sidebar-drawer] .dchat-title {
   flex: 0 0 auto;
 }
 
+.dchat-header-actions .dchat-native-sync {
+  box-sizing: border-box;
+  justify-content: center;
+  inline-size: 28px;
+  padding: 0;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.dchat-header-actions .dchat-native-sync[aria-disabled="true"] {
+  color: var(--dsw-alias-label-tertiary);
+  cursor: default;
+}
+
 .dchat-agent-catalog {
   position: relative;
   display: inline-flex;
@@ -1249,6 +1262,50 @@ html [data-sidebar-drawer] .dchat-title {
 .dchat-file-dialog {
   width: min(760px, 100%);
   max-height: 100%;
+}
+
+.dchat-native-preview {
+  width: min(680px, 100%);
+  max-height: 100%;
+  overflow-y: auto;
+}
+
+.dchat-native-preview-transcript {
+  display: grid;
+  gap: 12px;
+  max-height: min(52dvh, 540px);
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 2px;
+}
+
+.dchat-native-preview-message {
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: var(--dsw-radius-sm);
+  overflow-wrap: anywhere;
+}
+
+.dchat-native-preview-message h3 {
+  margin: 0 0 6px;
+  font-size: 12px;
+  font-weight: 550;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.dchat-native-preview-message p {
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+.dchat-native-preview-message details {
+  margin-block-end: 6px;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.dchat-native-preview-message summary {
+  cursor: pointer;
 }
 
 .dchat-file-dialog-content {
