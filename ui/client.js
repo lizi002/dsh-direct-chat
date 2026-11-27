@@ -915,7 +915,7 @@ function mergeSidebarRows(nativeRows, externalRows) {
 function hideNativeDraft(rows, directPanelActive) {
   return directPanelActive ? rows.filter((row) => !row.blank) : rows;
 }
-function projectSidebarGroups(nativeGroups, workspaces, expandedGroups, extraExpansion, byCwd, filter, defaultName, directPanelActive = false) {
+function projectSidebarGroups(nativeGroups, workspaces, expandedGroups, extraExpansion, byCwd, filter, defaultName, directPanelActive = false, orderBy = "manual") {
   if (directPanelActive) {
     nativeGroups = nativeGroups.map((group) => {
       const sessions = hideNativeDraft(group.sessions, true);
@@ -928,7 +928,7 @@ function projectSidebarGroups(nativeGroups, workspaces, expandedGroups, extraExp
       } : group;
     });
   }
-  if (!byCwd.size) return nativeGroups;
+  if (!byCwd.size && orderBy !== "updated") return nativeGroups;
   const nativeById = new Map(nativeGroups.map((group) => [group.workspaceId, group]));
   const expanded = new Set(expandedGroups);
   const registered = new Set(workspaces.map((workspace) => workspace.path));
@@ -947,7 +947,7 @@ function projectSidebarGroups(nativeGroups, workspaces, expandedGroups, extraExp
       sessions: []
     };
     if (!rows.length) groups.push(group);
-    else groups.push({ ...group, sessions: group.expanded ? mergeSidebarRows(group.sessions, rows) : group.sessions });
+    else groups.push({ ...group, latestSessionUpdate: rows.reduce((latest, row) => Math.max(latest, time(row)), group.latestSessionUpdate || 0), sessions: group.expanded ? mergeSidebarRows(group.sessions, rows) : group.sessions });
   }
   groups.push(...nativeGroups.filter((group) => group.workspaceId === void 0));
   for (const [cwd, items] of byCwd) {
@@ -963,10 +963,12 @@ function projectSidebarGroups(nativeGroups, workspaces, expandedGroups, extraExp
       cwd: cwd || void 0,
       label: cwd.split(/[/\\]/).filter(Boolean).at(-1) || cwd || defaultName,
       createdAt: created.length ? Math.min(...created) : void 0,
+      latestSessionUpdate: rows.reduce((latest, row) => Math.max(latest, time(row)), 0),
       expanded: expanded2,
       sessions: expanded2 ? mergeSidebarRows([], rows) : []
     });
   }
+  if (orderBy === "updated") groups.sort((a, b) => (b.latestSessionUpdate || 0) - (a.latestSessionUpdate || 0));
   return groups;
 }
 function createSidebarHistory(load = listSessions, focus = globalThis.window) {
@@ -9897,6 +9899,7 @@ function deriveGroups(list, workspaces, rowState, statuses, view) {
       createdAt: g.createdAt,
       label: g.label,
       sessionCount: g.sessions.length,
+      latestSessionUpdate: g.sessions.reduce((latest, session) => session.blank ? latest : Math.max(latest, session.updatedAt || 0), 0),
       expanded,
       containsCurrent: g.key === currentGroup,
       sessions: expanded ? sectionMembers(g.sessions, pinned, archived).map((session) => sessionNode(session, list, statuses, pinned, archived)) : []
@@ -11260,7 +11263,7 @@ function SessionTree({
     }),
     [list, workspaces, rowState, statuses, expandedGroups, ungroupedSessionIds]
   );
-  const groups = extension?.groups(nativeGroups, workspaces, expandedGroups, rowState.archivedFilter) ?? nativeGroups;
+  const groups = extension?.groups(nativeGroups, workspaces, expandedGroups, rowState.archivedFilter, extension.orderBy) ?? nativeGroups;
   (0, import_react23.useEffect)(() => {
     for (let key = revealGroup; key !== void 0; key = parents.get(key)) {
       if (groupExpansion[key] === false || key === revealGroup && groupExpansion[key] !== true) {
@@ -12170,7 +12173,7 @@ function WorkspaceBrowser({
     ) : /* @__PURE__ */ (0, import_jsx_runtime27.jsx)(
       SessionTree,
       {
-        extension,
+        extension: { ...extension, orderBy },
         useSessionAccess,
         useWorkspaceAccess,
         usePanelInfo,
@@ -12422,9 +12425,9 @@ function SidebarProjection({ render, history, statusStore = fallbackStatusStore,
       })
     ],
     activeId: active && target.id ? `direct-chat:session:${target.id}` : void 0,
-    groups: (groups, workspaces, expandedGroups, filter) => {
-      const nativeGroups = directOnly ? groups.filter((group) => group.workspaceId !== void 0).map((group) => ({ ...group, sessions: [], sessionCount: 0, containsCurrent: false })) : groups;
-      const projected = projectSidebarGroups(nativeGroups, workspaces, expandedGroups, expanded, filteredCwds, filter, t("cwd.default"), active);
+    groups: (groups, workspaces, expandedGroups, filter, orderBy) => {
+      const nativeGroups = directOnly ? groups.filter((group) => group.workspaceId !== void 0).map((group) => ({ ...group, sessions: [], sessionCount: 0, latestSessionUpdate: 0, containsCurrent: false })) : groups;
+      const projected = projectSidebarGroups(nativeGroups, workspaces, expandedGroups, expanded, filteredCwds, filter, t("cwd.default"), active, orderBy);
       const nextCwds = /* @__PURE__ */ new Map();
       for (const group of projected) {
         const path = group.directCwd ?? group.cwd;

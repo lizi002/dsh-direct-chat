@@ -204,11 +204,11 @@ export function SidebarProjection({ render, history, statusStore = fallbackStatu
       }),
     ],
     activeId: active && target.id ? `direct-chat:session:${target.id}` : undefined,
-    groups: (groups, workspaces, expandedGroups, filter) => {
+    groups: (groups, workspaces, expandedGroups, filter, orderBy) => {
       const nativeGroups = directOnly
-        ? groups.filter(group => group.workspaceId !== undefined).map(group => ({ ...group, sessions: [], sessionCount: 0, containsCurrent: false }))
+        ? groups.filter(group => group.workspaceId !== undefined).map(group => ({ ...group, sessions: [], sessionCount: 0, latestSessionUpdate: 0, containsCurrent: false }))
         : groups
-      const projected = projectSidebarGroups(nativeGroups, workspaces, expandedGroups, expanded, filteredCwds, filter, t('cwd.default'), active)
+      const projected = projectSidebarGroups(nativeGroups, workspaces, expandedGroups, expanded, filteredCwds, filter, t('cwd.default'), active, orderBy)
       const nextCwds = new Map()
       for (const group of projected) {
         const path = group.directCwd ?? group.cwd

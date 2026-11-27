@@ -160,3 +160,21 @@ test('agent filtering preserves workspaces and row order for current and histori
   assert.deepEqual([...sidebarAgentRows(groups, 'engine:codex')], [['/one', [codex]]])
   assert.deepEqual([...sidebarAgentRows(groups, 'engine:removed')], [['/one', [legacy]], ['/two', [legacy]]])
 })
+
+test('recent workspace order includes visible activity in folded native, mixed and direct-only workspaces', () => {
+  const workspaces = ['old', 'native', 'mixed'].map(id => ({ workspaceId: id, path: '/' + id }))
+  const native = workspaces.map(({ workspaceId }, i) => ({
+    key: workspaceId, workspaceId, sessions: [], expanded: false, latestSessionUpdate: [1, 20, 5][i],
+  }))
+  const direct = groupSidebarSessions([
+    { cwd: '/mixed', updatedAt: 30 }, { cwd: '/virtual', updatedAt: 40 },
+    { cwd: '/old', updatedAt: 90, archived: true },
+  ])
+  const order = (mode, filter, sources = direct) => projectSidebarGroups(native, workspaces, [], new Set(),
+    sources, filter, '', false, mode).map(group => group.key)
+  const virtual = virtualGroupKey('/virtual')
+  assert.deepEqual(order('updated', 'default'), [virtual, 'mixed', 'native', 'old'])
+  assert.deepEqual(order('updated', 'show'), ['old', virtual, 'mixed', 'native'])
+  assert.deepEqual(order('manual', 'default'), ['old', 'native', 'mixed', virtual])
+  assert.deepEqual(order('updated', 'default', new Map()), ['native', 'mixed', 'old'])
+})

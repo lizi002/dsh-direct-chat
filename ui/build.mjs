@@ -83,6 +83,14 @@ const { outputFiles } = await build({
         const contents = replaceExact(source, 'IconLayersOutlineRegular,', 'IconChecklistOutlineRegular as IconLayersOutlineRegular,', 'JobListAction icon')
         return { contents, loader: 'tsx', resolveDir: dirname(path) }
       })
+      build.onLoad({ filter: /tree\.ts$/ }, async ({ path }) => {
+        if (!path.includes('dsh-client-ui-workspace')) return
+        const source = await readFile(path, 'utf8')
+        const contents = replaceExact(source, 'sessionCount: g.sessions.length,',
+          'sessionCount: g.sessions.length,\n      latestSessionUpdate: g.sessions.reduce((latest, session) => session.blank ? latest : Math.max(latest, session.updatedAt || 0), 0),',
+          'Workspace group activity before folding')
+        return { contents, loader: 'ts' }
+      })
       build.onLoad({ filter: /WorkspaceBrowser\.tsx$/ }, async ({ path }) => {
         if (!path.includes('dsh-client-ui-workspace')) return
         let source = await readFile(path, 'utf8')
@@ -100,7 +108,7 @@ const { outputFiles } = await build({
           'SessionTree type')
         source = replaceExact(source,
           'const groups = useMemo(\n    () => deriveGroups(list, workspaces, rowState, statuses, {\n      expandedGroups,\n      ungroupedOrder: ungroupedSessionIds,\n    }),\n    [list, workspaces, rowState, statuses, expandedGroups, ungroupedSessionIds],\n  )',
-          'const nativeGroups = useMemo(\n    () => deriveGroups(list, workspaces, rowState, statuses, {\n      expandedGroups,\n      ungroupedOrder: ungroupedSessionIds,\n    }),\n    [list, workspaces, rowState, statuses, expandedGroups, ungroupedSessionIds],\n  )\n  const groups = extension?.groups(nativeGroups, workspaces, expandedGroups, rowState.archivedFilter) ?? nativeGroups',
+          'const nativeGroups = useMemo(\n    () => deriveGroups(list, workspaces, rowState, statuses, {\n      expandedGroups,\n      ungroupedOrder: ungroupedSessionIds,\n    }),\n    [list, workspaces, rowState, statuses, expandedGroups, ungroupedSessionIds],\n  )\n  const groups = extension?.groups(nativeGroups, workspaces, expandedGroups, rowState.archivedFilter, extension.orderBy) ?? nativeGroups',
           'SessionTree groups')
         source = replaceExact(source,
           '  const baselines = new Map(groups.map(group => [group.key, Math.max(SESSION_WATERMARK_BASE, requiredWatermark(\n    group.sessions,\n    current,',
@@ -156,7 +164,7 @@ const { outputFiles } = await build({
           'WorkspaceBrowser FlatList')
         source = replaceExact(source,
           '              <SessionTree\n                useSessionAccess={useSessionAccess}',
-          '              <SessionTree\n                extension={extension}\n                useSessionAccess={useSessionAccess}',
+          '              <SessionTree\n                extension={{ ...extension, orderBy }}\n                useSessionAccess={useSessionAccess}',
           'WorkspaceBrowser SessionTree')
         source = replaceExact(source,
           '                setGroupExpanded={actions.setGroupExpanded}',

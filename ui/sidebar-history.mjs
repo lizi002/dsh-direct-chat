@@ -79,7 +79,7 @@ export function hideNativeDraft(rows, directPanelActive) {
   return directPanelActive ? rows.filter(row => !row.blank) : rows
 }
 
-export function projectSidebarGroups(nativeGroups, workspaces, expandedGroups, extraExpansion, byCwd, filter, defaultName, directPanelActive = false) {
+export function projectSidebarGroups(nativeGroups, workspaces, expandedGroups, extraExpansion, byCwd, filter, defaultName, directPanelActive = false, orderBy = 'manual') {
   if (directPanelActive) {
     nativeGroups = nativeGroups.map(group => {
       const sessions = hideNativeDraft(group.sessions, true)
@@ -88,7 +88,7 @@ export function projectSidebarGroups(nativeGroups, workspaces, expandedGroups, e
         sessionCount: typeof group.sessionCount === 'number' ? group.sessionCount - hidden : undefined } : group
     })
   }
-  if (!byCwd.size) return nativeGroups
+  if (!byCwd.size && orderBy !== 'updated') return nativeGroups
   const nativeById = new Map(nativeGroups.map(group => [group.workspaceId, group]))
   const expanded = new Set(expandedGroups)
   const registered = new Set(workspaces.map(workspace => workspace.path))
@@ -107,7 +107,7 @@ export function projectSidebarGroups(nativeGroups, workspaces, expandedGroups, e
       sessions: [],
     }
     if (!rows.length) groups.push(group)
-    else groups.push({ ...group, sessions: group.expanded ? mergeSidebarRows(group.sessions, rows) : group.sessions })
+    else groups.push({ ...group, latestSessionUpdate: rows.reduce((latest, row) => Math.max(latest, time(row)), group.latestSessionUpdate || 0), sessions: group.expanded ? mergeSidebarRows(group.sessions, rows) : group.sessions })
   }
   groups.push(...nativeGroups.filter(group => group.workspaceId === undefined))
   for (const [cwd, items] of byCwd) {
@@ -121,9 +121,11 @@ export function projectSidebarGroups(nativeGroups, workspaces, expandedGroups, e
       key, directCwd: cwd, cwd: cwd || undefined,
       label: cwd.split(/[/\\]/).filter(Boolean).at(-1) || cwd || defaultName,
       createdAt: created.length ? Math.min(...created) : undefined,
+      latestSessionUpdate: rows.reduce((latest, row) => Math.max(latest, time(row)), 0),
       expanded, sessions: expanded ? mergeSidebarRows([], rows) : [],
     })
   }
+  if (orderBy === 'updated') groups.sort((a, b) => (b.latestSessionUpdate || 0) - (a.latestSessionUpdate || 0))
   return groups
 }
 
